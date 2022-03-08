@@ -1,0 +1,137 @@
+# 02/28/2022: Writing a webscrape script that takes relevant data out of a website and populates a dataframe
+# From there, use GeoPandas to plot the scraped data up as a choropleth map. 
+
+# Checking some background environment stuff:
+import sys
+sys.executable
+import platform
+platform.architecture()
+
+# Import most critical libraries for this script:
+
+# Import HTML libraries: 
+import requests 
+from bs4 import BeautifulSoup
+# Import REGEX library if needed (can stay commented out): 
+# import re
+
+# Import dataframe/geospatial dataframe libraries: 
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point, Polygon
+
+# Import one pure plotting library (will help with making nice looking legends at the end of this script):
+import matplotlib.pyplot as plt
+
+# IMPORTANT NOTE to future users:
+# I had a LOT of trouble getting the 'geopandas' library installed properly using pip... I would recommend downloading the raw "wheel" files for
+# the prerequisite "GDAL" and "Fiona" packages from these links (download only the package that matches your system's architecture (32 or 64 bit) and the corresponding Python version): 
+    # https://www.lfd.uci.edu/~gohlke/pythonlibs/#gdal
+    # https://www.lfd.uci.edu/~gohlke/pythonlibs/#fiona
+
+# Once these are downloaded, type the following in the command line below in Spyder or your Python IDE of choice (MAKE SURE GDAL IS INSTALLED BEFORE FIONA!): 
+    # pip install path/to/downloaded/GDALfile.whl
+    # pip install path/to/downloaded/fionafile.whl
+
+# Once those are installed, then type the following in the command line and you should be good to go:
+    # pip install geopandas
+    
+# Refer to this GIS StackExchange discussion if you still need more help:
+    # https://gis.stackexchange.com/questions/330840/error-installing-geopandas
+    
+# # # --- PART 1: LOAD THE TABLE FROM THE WEB --- # # #
+
+# Ping the URL we want to extract a wiki table from: 
+URL = "https://en.wikipedia.org/wiki/List_of_U.S._states_and_territories_by_income"
+
+# random testing next two lines: 
+# page = requests.get(URL)
+# table_class = "wikitable sortable jquery-tablesorter"
+
+# Save the HTML response: 
+response = requests.get(URL)
+
+# Parse the above raw html table/data response into a BeautifulSoup object (a cleaner way to look at the response):
+soupy = BeautifulSoup(response.text,'html.parser')
+# find the sub-object in that HTML response that is of class 'wikitable':
+usa_table = soupy.find('table', {'class':"wikitable"})
+# Note to self, what if there were multiple wikitables per url? Would we have to iterate then? Probably... worth looking into later. 
+
+# Pandas has some built in functions that can read HTML, use these to make our DF:
+wiki_df = pd.read_html(str(usa_table))
+# convert list to dataframe below (because dataframes have more functionality than lists):
+wiki_df = pd.DataFrame(wiki_df[0])
+
+# # # --- PART 2: REFORMAT THE DATAFRAME SLIGHTLY --- # # #
+
+# Looking at our fresh and brand new dataframe, we can see there might be some issues with plotting the data on a map. 
+# First of all, there are some columns we are not interested in for the purposes of this script.
+# Namely, we don't care about the 'State Rank' and 'Growth Rate' columns, so let's drop them: 
+
+wiki_df_v2 = wiki_df.drop(columns = ['State Rank','Average annual growth rate (current dollars) in 2010-2019,\xa0%'], axis = 1)
+
+# Cool, now that we've narrowed our data frame down to the columns we want, let's get rid of the dollar signs and convert all the numbers from str to int.
+# We convert from string (str) to integer (int) because a lot of the plotting functions in Python require numerical values to be actual integers or float (decimal) numbers.
+# If we try to plot a string, even though that string might be made up of numerical characters, we will get errors. 
+# Said another way: unless the numerals are actual numbers, we will see errors returned by our script whenever we try to run it. 
+
+# We're going to loop through a list of only the column names we want to remove dollar signs and commas in the numbers from. 
+# Make a list of the matching column names, this will be used for column selection in the     
+target_column_list = list(wiki_df_v2.columns)
+
+# Now, loop through the first through last items in the target_column_list :
+for i in list(range(1,(len(target_column_list)),1)):
+    wiki_df_v2[target_column_list[i]] = wiki_df_v2[target_column_list[i]].str.replace(',', '')
+    wiki_df_v2[target_column_list[i]] = wiki_df_v2[target_column_list[i]].str.replace(r'$', '')
+    wiki_df_v2[target_column_list[i]] = wiki_df_v2[target_column_list[i]].astype(int)
+    
+
+
+# # # --- PART 3: GEOPANDAS TIME --- # # # 
+    
+# You will need to download a shapefile of state polygons, I used the US census website below to find a good one: 
+# https://www.census.gov/geographies/mapping-files/time-series/geo/carto-boundary-file.html
+
+
+USA_shp = gpd.read_file('G:\TWitham\DataRole\Testing_Python\cb_2018_us_state_5m.shp')
+
+# Note that the names of Washington D.C. differ between this shapefile we just loaded in and
+# the equivalent location within the wiki_df_v2. Rename "Washington DC" to "District of Columbia"
+
+wiki_df_v2.at[1,'States and Washington, D.C.'] = 'District of Columbia'
+# ^ Little data cleanups like this are often necessary to do when getting data ready for actual analysis.
+
+# We also want to rename the "States" column in wiki_df_v2 to "NAME" so the left join with USA_shp will be as seamless as possible: 
+wiki_df_v2 = wiki_df_v2.rename(columns = {'States and Washington, D.C.' : 'NAME'})
+
+# Now, we are going to do a merge (specifically, a left join) on the two data sets: the geodataframe named "USA_shp" & the regular Pandas dataframe named "wiki_df_v2":
+# NOTE! The Geodataframe should always be the left side of the join, otherwise we will remove the geometry information which is most crucial for Python to be able
+# to draw our map automatically for us. 
+
+# if you would like to read further about attribute joins in geopandas, I recommend reading their documentation here: https://geopandas.org/en/stable/docs/user_guide/mergingdata.html
+
+USA_shp = USA_shp.merge(wiki_df_v2, on = 'NAME')
+
+# Great, the merge above worked perfectly! We joined the geodataframe (USA_shp) to the regular Wikipedia dataframe (wiki_df_v2).
+
+# All that's left now is to make a choropleth map of each state, colored by the average household income.
+
+# Make a copy of USA_shp with a shorter name (will make for easier to read code when plotting):
+USA = USA_shp
+
+# pick a year of your choice from this list: 2019,2018,2017,2016,2015,2014,2013,2012,2011, or 2010. 
+# I graduated from TU in 2017, so let's pick that year.
+year_of_choice = '2017'
+
+# !!! Now, Make a map plot of our data !!! #
+
+# default, basic plot is below, but let's make it prettier.
+# USA.plot(column = year_of_choice);
+
+# Start by adding a legend using matplotlib:
+# Add a legend:
+fig, ax = plt.subplots(1,1)
+USA.plot(column = year_of_choice, ax = ax, legend = True)
+# !!! NOTE that the map will appear in a separate window down in your taskbar. Click on the icon in your taskbar to view the map. 
+# Make sure to zoom in on the map using the "magnifying glass" button on the top left if you want to zoom in on the continental USA. 
+
